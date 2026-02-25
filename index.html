@@ -2,106 +2,209 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>Gemini Pro 3D AI 塔罗占卜系统</title>
+    <title>AI 灵感塔罗 - 高性能手势版</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
     <style>
-        :root { --gold: #d4af37; --purple: #1a0a2e; }
-        body { margin: 0; overflow: hidden; background: radial-gradient(circle, #1a0a2e 0%, #05020a 100%); font-family: 'Microsoft YaHei', serif; }
-        #ui-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 100; color: var(--gold); }
-        .panel { pointer-events: auto; background: rgba(0,0,0,0.7); border: 1px solid var(--gold); padding: 15px; border-radius: 8px; backdrop-filter: blur(10px); }
-        #controls { position: absolute; top: 20px; left: 20px; width: 200px; }
-        #status-bar { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); text-align: center; width: 400px; font-size: 18px; text-shadow: 0 0 10px var(--gold); }
-        #history { position: absolute; top: 20px; right: 20px; width: 240px; max-height: 80vh; overflow-y: auto; }
-        #video-preview { position: absolute; bottom: 20px; right: 20px; width: 200px; height: 150px; border: 2px solid var(--gold); transform: scaleX(-1); border-radius: 10px; }
-        button { background: transparent; color: var(--gold); border: 1px solid var(--gold); width: 100%; padding: 8px; margin: 5px 0; cursor: pointer; transition: 0.3s; }
-        button:hover { background: var(--gold); color: black; }
-        .card-log { font-size: 12px; margin-bottom: 5px; border-bottom: 1px solid #333; padding-bottom: 5px; }
+        :root { --accent: #b287ff; }
+        body { margin: 0; background: #05020a; color: white; font-family: sans-serif; overflow: hidden; }
+        #ui { position: absolute; top: 20px; left: 20px; z-index: 10; pointer-events: none; width: 100%; }
+        .hint-box { background: rgba(0,0,0,0.8); padding: 15px; border: 1px solid var(--accent); border-radius: 8px; width: fit-content; pointer-events: auto; }
+        #status { color: var(--accent); font-weight: bold; font-size: 20px; text-shadow: 0 0 10px var(--accent); }
+        #cam-view { position: absolute; bottom: 20px; right: 20px; width: 240px; height: 180px; border: 2px solid var(--accent); border-radius: 10px; transform: scaleX(-1); }
+        .log-list { position: absolute; right: 20px; top: 20px; width: 200px; max-height: 50vh; overflow-y: auto; background: rgba(20,20,40,0.6); padding: 10px; font-size: 12px; }
     </style>
 </head>
 <body>
 
-    <div id="ui-overlay">
-        <div id="status-bar">正在加载 78 张神秘塔罗...</div>
-        
-        <div id="controls" class="panel">
-            <h3 style="margin-top:0">选择牌阵</h3>
-            <button onclick="initGame('single')">单张启示 (1张)</button>
-            <button onclick="initGame('three')">圣三角 (3张)</button>
-            <button onclick="initGame('cross')">十字恋人 (5张)</button>
-            <hr border="0" style="border-top:1px solid #444">
-            <button onclick="shuffleDeck()" style="border-color:#ff6b6b; color:#ff6b6b;">重新洗牌</button>
+    <div id="ui">
+        <div class="hint-box">
+            <div id="status">系统准备中...</div>
+            <div style="font-size: 12px; margin-top: 5px; color: #aaa;">
+                👋 左右挥动手掌：洗牌<br>
+                👌 捏合手指：抽牌<br>
+                🖐 握拳后张开：翻开看牌
+            </div>
+            <select id="spread-type" style="margin-top:10px; pointer-events:auto;" onchange="changeSpread(this.value)">
+                <option value="single">单张启示</option>
+                <option value="three">三时牌阵</option>
+                <option value="cross">十字恋人</option>
+            </select>
         </div>
-
-        <div id="history" class="panel">
-            <div style="font-weight:bold; margin-bottom:10px;">占卜之书</div>
-            <div id="log-content"></div>
-        </div>
+        <div id="log" class="log-list"></div>
     </div>
 
-    <div id="video-preview">
-        <video id="input_video" style="display:none"></video>
-        <canvas class="output_canvas" style="width:100%; height:100%"></canvas>
-    </div>
+    <canvas id="cam-view"></canvas>
+    <video id="input_video" style="display:none"></video>
 
 <script>
-/**
- * 1. 完善的 78 张牌库配置
- */
-const CARD_DATA = [];
+/** 1. 牌库数据与状态管理 **/
+const CARD_BASE_URL = "https://raw.githubusercontent.com/the-prodigal-son/tarot-api/master/static/cards/";
+const MajorNames = ['Fool','Magician','Priestess','Empress','Emperor','Hierophant','Lovers','Chariot','Strength','Hermit','Wheel','Justice','HangedMan','Death','Temperance','Devil','Tower','Star','Moon','Sun','Judgement','World'];
 const SUITS = ['cups', 'pentacles', 'swords', 'wands'];
 const FACES = ['01','02','03','04','05','06','07','08','09','10','page','knight','queen','king'];
 
-// 大阿卡纳 (22张)
-const MajorNames = ['Fool','Magician','Priestess','Empress','Emperor','Hierophant','Lovers','Chariot','Strength','Hermit','Wheel','Justice','HangedMan','Death','Temperance','Devil','Tower','Star','Moon','Sun','Judgement','World'];
-MajorNames.forEach((name, i) => {
-    let id = i.toString().padStart(2, '0');
-    CARD_DATA.push({ id: `ar${id}`, name: `[大阿卡纳] ${name}`, url: `https://raw.githubusercontent.com/the-prodigal-son/tarot-api/master/static/cards/ar${id}.jpg` });
-});
-// 小阿卡纳 (56张)
-SUITS.forEach(suit => {
-    FACES.forEach(face => {
-        let code = suit[0] + face;
-        CARD_DATA.push({ id: code, name: `${face} of ${suit}`, url: `https://raw.githubusercontent.com/the-prodigal-son/tarot-api/master/static/cards/${code}.jpg` });
-    });
-});
+let deckPool = [];
+const buildPool = () => {
+    deckPool = [];
+    MajorNames.forEach((_, i) => deckPool.push({ id: `ar${i.toString().padStart(2, '0')}`, name: MajorNames[i] }));
+    SUITS.forEach(s => FACES.forEach(f => deckPool.push({ id: s[0]+f, name: `${f} of ${s}` })));
+    deckPool.sort(() => Math.random() - 0.5);
+};
 
-/**
- * 2. 初始化 3D 引擎
- */
+/** 2. Three.js 核心 **/
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 1000);
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 限制DPI防止卡顿
 document.body.appendChild(renderer.domElement);
 
-const ambient = new THREE.AmbientLight(0xffffff, 0.5);
-const point = new THREE.PointLight(0xffd700, 2, 50);
-point.position.set(0, 5, 5);
-scene.add(ambient, point);
-camera.position.set(0, 2, 10);
-
-let deckPool = [];
-let drawnCards = [];
-let visualDeck = []; // 用于洗牌特效的物体
-let currentSpread = 'single';
-let maxDraw = 1;
+const light = new THREE.SpotLight(0xffffff, 100);
+light.position.set(0, 5, 10);
+scene.add(new THREE.AmbientLight(0x4040ff, 2), light);
+camera.position.z = 10;
 
 const loader = new THREE.TextureLoader();
 const backTex = loader.load('https://upload.wikimedia.org/wikipedia/commons/5/54/Tarot_Back.jpg');
 
-/**
- * 3. 牌阵坐标映射
- */
-const SPREAD_CONFIGS = {
-    'single': [{x:0, y:0, z:0, label: "启示"}],
-    'three': [
-        {x:-3, y:0, z:0, label: "过去"},
-        {x:0, y:0, z:0, label: "现在"},
-        {x:3, y:0, z:0, label: "未来"}
-    ],
-    'cross': [
-        {x:0, y:0, z:0, label: "现状"},
-        {x:0, y:0.2, z:0
+let drawnMeshes = [];
+let shuffleGroup = new THREE.Group();
+scene.add(shuffleGroup);
+
+/** 3. 动画与手势逻辑 **/
+const SPREADS = {
+    single: [{x:0, y:0, label: "心之所向"}],
+    three: [{x:-3, y:0, label: "过去"}, {x:0, y:0, label: "现在"}, {x:3, y:0, label: "未来"}],
+    cross: [{x:0, y:0, label: "现状"}, {x:0, y:0, z:0.5, rz:Math.PI/2, label: "障碍"}, {x:0, y:2.5, label: "高位"}, {x:0, y:-2.5, label: "根基"}, {x:3, y:0, label: "环境"}]
+};
+let currentMode = 'single';
+
+function performShuffle() {
+    buildPool();
+    drawnMeshes.forEach(m => scene.remove(m));
+    drawnMeshes = [];
+    shuffleGroup.clear();
+    
+    // 简化洗牌视觉：只用15张代表牌提高性能
+    for(let i=0; i<15; i++) {
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(2, 3.2, 0.05), new THREE.MeshStandardMaterial({map: backTex}));
+        mesh.position.y = -10;
+        shuffleGroup.add(mesh);
+        gsap.to(mesh.position, {
+            x: (Math.random()-0.5)*3, y: -4, z: i*0.1,
+            rotationY: Math.random()*2,
+            duration: 0.8, delay: i*0.02
+        });
+    }
+    document.getElementById('status').innerText = "✨ 洗牌中...";
+    setTimeout(() => document.getElementById('status').innerText = "👌 请捏合手指抽牌", 1000);
+}
+
+function drawCard(handX, handY) {
+    if (drawnMeshes.length >= SPREADS[currentMode].length) return;
+
+    const cardInfo = deckPool.splice(Math.floor(Math.random()*deckPool.length), 1)[0];
+    const isRev = Math.random() > 0.5;
+    
+    const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(2, 3.2, 0.1),
+        [new THREE.MeshStandardMaterial({color:0x222}),new THREE.MeshStandardMaterial({color:0x222}),new THREE.MeshStandardMaterial({color:0x222}),new THREE.MeshStandardMaterial({color:0x222}),
+         new THREE.MeshStandardMaterial({color:0x111}), // 初始正面黑色
+         new THREE.MeshStandardMaterial({map: backTex})]
+    );
+    mesh.cardData = cardInfo;
+    mesh.isReversed = isRev;
+    mesh.isRevealed = false;
+    mesh.position.set(handX, handY, 2);
+    scene.add(mesh);
+    drawnMeshes.push(mesh);
+
+    const config = SPREADS[currentMode][drawnMeshes.length-1];
+    gsap.to(mesh.position, { x: config.x, y: config.y, z: config.z || 0, duration: 1 });
+    if(config.rz) gsap.to(mesh.rotation, { z: config.rz, duration: 1 });
+}
+
+function revealAll() {
+    drawnMeshes.forEach(mesh => {
+        if (mesh.isRevealed) return;
+        mesh.isRevealed = true;
+        // 动态加载纹理，节省初始内存
+        loader.load(`${CARD_BASE_URL}${mesh.cardData.id}.jpg`, (tex) => {
+            mesh.material[4].map = tex;
+            mesh.material[4].needsUpdate = true;
+            gsap.to(mesh.rotation, { y: Math.PI, z: mesh.isReversed ? Math.PI : (mesh.rotation.z || 0), duration: 1.2 });
+        });
+    });
+    document.getElementById('status').innerText = "👁️ 命运已揭示";
+}
+
+/** 4. MediaPipe 高性能检测 **/
+const videoElement = document.getElementById('input_video');
+const canvasElement = document.getElementById('cam-view');
+const ctx = canvasElement.getContext('2d');
+
+let lastX = 0;
+let pinchCooldown = false;
+let lastFistState = false;
+
+const hands = new Hands({locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.6 }); // modelComplexity:0 大幅提升帧率
+
+hands.onResults(results => {
+    ctx.save();
+    ctx.clearRect(0,0,240,180);
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const h = results.multiHandLandmarks[0];
+        
+        // --- 1. 洗牌手势：检测X轴摆动速度 ---
+        const currentX = h[9].x;
+        const speed = Math.abs(currentX - lastX);
+        if (speed > 0.08 && h[8].y < h[7].y) { // 快速挥动手掌
+            performShuffle();
+        }
+        lastX = currentX;
+
+        // --- 2. 抽牌手势：捏合 (Pinch) ---
+        const dist = Math.hypot(h[4].x - h[8].x, h[4].y - h[8].y);
+        if (dist < 0.04 && !pinchCooldown) {
+            drawCard((0.5-h[8].x)*15, (0.5-h[8].y)*10);
+            pinchCooldown = true;
+            setTimeout(() => pinchCooldown = false, 1000);
+        }
+
+        // --- 3. 看牌手势：握拳展开 (Fist to Open) ---
+        const isFist = h[8].y > h[6].y && h[12].y > h[10].y;
+        if (lastFistState && !isFist) { // 从握拳变为张开
+            revealAll();
+        }
+        lastFistState = isFist;
+
+        // 绘制辅助线
+        drawConnectors(ctx, h, HAND_CONNECTIONS, {color: '#b287ff', lineWidth: 2});
+    }
+    ctx.restore();
+});
+
+const cameraUtils = new Camera(videoElement, {
+    onFrame: async () => await hands.send({image: videoElement}),
+    width: 640, height: 480
+});
+cameraUtils.start();
+
+function animate() {
+    requestAnimationFrame(animate);
+    renderer.render(scene, camera);
+}
+animate();
+function changeSpread(v) { currentMode = v; performShuffle(); }
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth/window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
