@@ -2,204 +2,227 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>AI 灵感塔罗 - 高性能手势版</title>
+    <title>AI 灵动塔罗 - 极速版</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
     <style>
-        :root { --accent: #b287ff; }
-        body { margin: 0; background: #05020a; color: white; font-family: sans-serif; overflow: hidden; }
-        #ui { position: absolute; top: 20px; left: 20px; z-index: 10; pointer-events: none; width: 100%; }
-        .hint-box { background: rgba(0,0,0,0.8); padding: 15px; border: 1px solid var(--accent); border-radius: 8px; width: fit-content; pointer-events: auto; }
-        #status { color: var(--accent); font-weight: bold; font-size: 20px; text-shadow: 0 0 10px var(--accent); }
-        #cam-view { position: absolute; bottom: 20px; right: 20px; width: 240px; height: 180px; border: 2px solid var(--accent); border-radius: 10px; transform: scaleX(-1); }
-        .log-list { position: absolute; right: 20px; top: 20px; width: 200px; max-height: 50vh; overflow-y: auto; background: rgba(20,20,40,0.6); padding: 10px; font-size: 12px; }
+        body { margin: 0; background: #000; color: #fff; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        /* 确保摄像头画面在最上层显示，方便调试 */
+        #ui-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+        .panel { pointer-events: auto; background: rgba(10, 5, 20, 0.8); border: 1px solid #6e45e2; padding: 15px; margin: 20px; border-radius: 12px; width: 220px; }
+        #cam-layer { position: absolute; bottom: 20px; right: 20px; width: 320px; height: 240px; border: 2px solid #00f2fe; border-radius: 10px; background: #111; z-index: 100; }
+        #status-msg { color: #00f2fe; font-weight: bold; text-transform: uppercase; font-size: 14px; margin-bottom: 10px; }
+        canvas.output_canvas { width: 100%; height: 100%; transform: scaleX(-1); }
+        .btn { background: #6e45e2; color: white; border: none; padding: 8px; width: 100%; cursor: pointer; border-radius: 4px; margin-top: 5px; }
     </style>
 </head>
 <body>
 
-    <div id="ui">
-        <div class="hint-box">
-            <div id="status">系统准备中...</div>
-            <div style="font-size: 12px; margin-top: 5px; color: #aaa;">
-                👋 左右挥动手掌：洗牌<br>
-                👌 捏合手指：抽牌<br>
-                🖐 握拳后张开：翻开看牌
+    <div id="ui-container">
+        <div class="panel">
+            <div id="status-msg">系统初始化...</div>
+            <div style="font-size: 11px; opacity: 0.7;">
+                👋 挥手：洗牌<br>
+                👌 捏合：抽牌<br>
+                ✊->🖐 张开拳头：看牌
             </div>
-            <select id="spread-type" style="margin-top:10px; pointer-events:auto;" onchange="changeSpread(this.value)">
+            <select id="spread" style="margin-top:10px; pointer-events:auto;" onchange="changeSpread(this.value)">
                 <option value="single">单张启示</option>
-                <option value="three">三时牌阵</option>
-                <option value="cross">十字恋人</option>
+                <option value="three">三圣三角</option>
+                <option value="cross">十字阵</option>
             </select>
+            <button class="btn" onclick="startCamera()">重试摄像头</button>
         </div>
-        <div id="log" class="log-list"></div>
     </div>
 
-    <canvas id="cam-view"></canvas>
-    <video id="input_video" style="display:none"></video>
+    <div id="cam-layer">
+        <video id="input_video" style="display:none"></video>
+        <canvas class="output_canvas"></canvas>
+    </div>
 
 <script>
-/** 1. 牌库数据与状态管理 **/
-const CARD_BASE_URL = "https://raw.githubusercontent.com/the-prodigal-son/tarot-api/master/static/cards/";
-const MajorNames = ['Fool','Magician','Priestess','Empress','Emperor','Hierophant','Lovers','Chariot','Strength','Hermit','Wheel','Justice','HangedMan','Death','Temperance','Devil','Tower','Star','Moon','Sun','Judgement','World'];
-const SUITS = ['cups', 'pentacles', 'swords', 'wands'];
-const FACES = ['01','02','03','04','05','06','07','08','09','10','page','knight','queen','king'];
-
+/** 1. 核心状态与牌库 **/
+const API_URL = "https://raw.githubusercontent.com/the-prodigal-son/tarot-api/master/static/cards/";
 let deckPool = [];
-const buildPool = () => {
-    deckPool = [];
-    MajorNames.forEach((_, i) => deckPool.push({ id: `ar${i.toString().padStart(2, '0')}`, name: MajorNames[i] }));
-    SUITS.forEach(s => FACES.forEach(f => deckPool.push({ id: s[0]+f, name: `${f} of ${s}` })));
-    deckPool.sort(() => Math.random() - 0.5);
+const SPREADS = {
+    single: [{x:0, y:0, l: "启示"}],
+    three: [{x:-3, y:0, l: "过去"}, {x:0, y:0, l: "现在"}, {x:3, y:0, l: "未来"}],
+    cross: [{x:0, y:0, l: "现状"}, {x:0, y:0, z:0.5, rz:Math.PI/2, l: "阻碍"}, {x:0, y:2.5, l: "高位"}, {x:0, y:-2.5, l: "基础"}, {x:3, y:0, l: "外部"}]
 };
+let currentMode = 'single';
+let drawnMeshes = [];
 
-/** 2. Three.js 核心 **/
+// 初始化牌池（无图片）
+function buildPool() {
+    deckPool = [];
+    for(let i=0; i<22; i++) deckPool.push({id:`ar${i.toString().padStart(2,'0')}`, n:'Major'});
+    ['cups','pentacles','swords','wands'].forEach(s => {
+        ['01','02','03','04','05','06','07','08','09','10','page','knight','queen','king'].forEach(f => {
+            deckPool.push({id: s[0]+f, n: `${f} of ${s}`});
+        });
+    });
+    deckPool.sort(() => Math.random() - 0.5);
+}
+
+/** 2. Three.js 极速渲染引擎 **/
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 1000);
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 限制DPI防止卡顿
+renderer.setPixelRatio(1); // 强制 1.0 像素比，极其流畅
 document.body.appendChild(renderer.domElement);
 
-const light = new THREE.SpotLight(0xffffff, 100);
-light.position.set(0, 5, 10);
-scene.add(new THREE.AmbientLight(0x4040ff, 2), light);
+const ambient = new THREE.AmbientLight(0x4433aa, 1.5);
+const point = new THREE.PointLight(0x00f2fe, 5, 20);
+point.position.set(0, 5, 5);
+scene.add(ambient, point);
 camera.position.z = 10;
 
+// 预加载单张背面图
 const loader = new THREE.TextureLoader();
 const backTex = loader.load('https://upload.wikimedia.org/wikipedia/commons/5/54/Tarot_Back.jpg');
 
-let drawnMeshes = [];
-let shuffleGroup = new THREE.Group();
-scene.add(shuffleGroup);
+// 发光边缘材质
+const glowMaterial = new THREE.MeshBasicMaterial({ color: 0x00f2fe, wireframe: true, transparent: true, opacity: 0.3 });
 
-/** 3. 动画与手势逻辑 **/
-const SPREADS = {
-    single: [{x:0, y:0, label: "心之所向"}],
-    three: [{x:-3, y:0, label: "过去"}, {x:0, y:0, label: "现在"}, {x:3, y:0, label: "未来"}],
-    cross: [{x:0, y:0, label: "现状"}, {x:0, y:0, z:0.5, rz:Math.PI/2, label: "障碍"}, {x:0, y:2.5, label: "高位"}, {x:0, y:-2.5, label: "根基"}, {x:3, y:0, label: "环境"}]
-};
-let currentMode = 'single';
+let visualDeck = []; // 用于洗牌的长廊卡牌
+function createVisualDeck() {
+    visualDeck.forEach(m => scene.remove(m));
+    visualDeck = [];
+    const geo = new THREE.BoxGeometry(2, 3.2, 0.02);
+    for(let i=0; i<20; i++) {
+        const m = new THREE.Mesh(geo, glowMaterial);
+        m.position.set((i-10)*0.8, -4, -i*0.2);
+        scene.add(m);
+        visualDeck.push(m);
+    }
+}
 
-function performShuffle() {
+/** 3. 手势与游戏逻辑 **/
+function shuffleEffect() {
+    document.getElementById('status-msg').innerText = "🔮 灵力洗牌中...";
     buildPool();
     drawnMeshes.forEach(m => scene.remove(m));
     drawnMeshes = [];
-    shuffleGroup.clear();
     
-    // 简化洗牌视觉：只用15张代表牌提高性能
-    for(let i=0; i<15; i++) {
-        const mesh = new THREE.Mesh(new THREE.BoxGeometry(2, 3.2, 0.05), new THREE.MeshStandardMaterial({map: backTex}));
-        mesh.position.y = -10;
-        shuffleGroup.add(mesh);
-        gsap.to(mesh.position, {
-            x: (Math.random()-0.5)*3, y: -4, z: i*0.1,
-            rotationY: Math.random()*2,
-            duration: 0.8, delay: i*0.02
+    visualDeck.forEach((m, i) => {
+        gsap.to(m.position, {
+            x: (Math.random()-0.5)*5, y: (Math.random()-0.5)*3, z: (Math.random()-0.5)*2,
+            duration: 0.5, repeat: 1, yoyo: true,
+            ease: "sine.inOut"
         });
-    }
-    document.getElementById('status').innerText = "✨ 洗牌中...";
-    setTimeout(() => document.getElementById('status').innerText = "👌 请捏合手指抽牌", 1000);
+    });
 }
 
-function drawCard(handX, handY) {
+function drawOne(hx, hy) {
     if (drawnMeshes.length >= SPREADS[currentMode].length) return;
-
-    const cardInfo = deckPool.splice(Math.floor(Math.random()*deckPool.length), 1)[0];
+    const data = deckPool.pop();
     const isRev = Math.random() > 0.5;
-    
+
+    // 创建实物牌
     const mesh = new THREE.Mesh(
         new THREE.BoxGeometry(2, 3.2, 0.1),
-        [new THREE.MeshStandardMaterial({color:0x222}),new THREE.MeshStandardMaterial({color:0x222}),new THREE.MeshStandardMaterial({color:0x222}),new THREE.MeshStandardMaterial({color:0x222}),
-         new THREE.MeshStandardMaterial({color:0x111}), // 初始正面黑色
-         new THREE.MeshStandardMaterial({map: backTex})]
+        [
+            new THREE.MeshStandardMaterial({color:0x333}), new THREE.MeshStandardMaterial({color:0x333}),
+            new THREE.MeshStandardMaterial({color:0x333}), new THREE.MeshStandardMaterial({color:0x333}),
+            new THREE.MeshStandardMaterial({color:0x000}), // 预留正面
+            new THREE.MeshStandardMaterial({map: backTex}) // 背面
+        ]
     );
-    mesh.cardData = cardInfo;
+    mesh.cardData = data;
     mesh.isReversed = isRev;
-    mesh.isRevealed = false;
-    mesh.position.set(handX, handY, 2);
+    mesh.position.set(hx, hy, 2);
     scene.add(mesh);
     drawnMeshes.push(mesh);
 
-    const config = SPREADS[currentMode][drawnMeshes.length-1];
-    gsap.to(mesh.position, { x: config.x, y: config.y, z: config.z || 0, duration: 1 });
-    if(config.rz) gsap.to(mesh.rotation, { z: config.rz, duration: 1 });
+    const cfg = SPREADS[currentMode][drawnMeshes.length-1];
+    gsap.to(mesh.position, { x: cfg.x, y: cfg.y, z: cfg.z || 0, duration: 1, ease: "back.out" });
+    if(cfg.rz) gsap.to(mesh.rotation, { z: cfg.rz, duration: 1 });
+
+    // 后台立刻预取该卡牌贴图
+    loader.load(`${API_URL}${data.id}.jpg`, (tex) => {
+        mesh.material[4].map = tex;
+        mesh.material[4].needsUpdate = true;
+    });
 }
 
 function revealAll() {
-    drawnMeshes.forEach(mesh => {
-        if (mesh.isRevealed) return;
-        mesh.isRevealed = true;
-        // 动态加载纹理，节省初始内存
-        loader.load(`${CARD_BASE_URL}${mesh.cardData.id}.jpg`, (tex) => {
-            mesh.material[4].map = tex;
-            mesh.material[4].needsUpdate = true;
-            gsap.to(mesh.rotation, { y: Math.PI, z: mesh.isReversed ? Math.PI : (mesh.rotation.z || 0), duration: 1.2 });
-        });
+    document.getElementById('status-msg').innerText = "👁️ 命运揭晓";
+    drawnMeshes.forEach(m => {
+        gsap.to(m.rotation, { y: Math.PI, z: m.isReversed ? Math.PI : (m.rotation.z || 0), duration: 1.5 });
     });
-    document.getElementById('status').innerText = "👁️ 命运已揭示";
 }
 
-/** 4. MediaPipe 高性能检测 **/
-const videoElement = document.getElementById('input_video');
-const canvasElement = document.getElementById('cam-view');
-const ctx = canvasElement.getContext('2d');
-
-let lastX = 0;
-let pinchCooldown = false;
-let lastFistState = false;
+/** 4. 摄像头与 AI 检测 (修复黑色屏幕) **/
+const video = document.getElementById('input_video');
+const canvas = document.querySelector('.output_canvas');
+const ctx = canvas.getContext('2d');
 
 const hands = new Hands({locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
-hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.6 }); // modelComplexity:0 大幅提升帧率
+hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.6 });
+
+let lastX = 0, lastFist = false, cooldown = false;
 
 hands.onResults(results => {
+    // 即使没手也要画背景
     ctx.save();
-    ctx.clearRect(0,0,240,180);
+    ctx.clearRect(0,0,canvas.width, canvas.height);
+    if(results.image) ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
     if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
         const h = results.multiHandLandmarks[0];
         
-        // --- 1. 洗牌手势：检测X轴摆动速度 ---
-        const currentX = h[9].x;
-        const speed = Math.abs(currentX - lastX);
-        if (speed > 0.08 && h[8].y < h[7].y) { // 快速挥动手掌
-            performShuffle();
-        }
-        lastX = currentX;
+        // 洗牌检测
+        if (Math.abs(h[9].x - lastX) > 0.08) shuffleEffect();
+        lastX = h[9].x;
 
-        // --- 2. 抽牌手势：捏合 (Pinch) ---
+        // 捏合抽牌
         const dist = Math.hypot(h[4].x - h[8].x, h[4].y - h[8].y);
-        if (dist < 0.04 && !pinchCooldown) {
-            drawCard((0.5-h[8].x)*15, (0.5-h[8].y)*10);
-            pinchCooldown = true;
-            setTimeout(() => pinchCooldown = false, 1000);
+        if (dist < 0.04 && !cooldown) {
+            drawOne((0.5-h[8].x)*15, (0.5-h[8].y)*10);
+            cooldown = true; setTimeout(() => cooldown = false, 1500);
         }
 
-        // --- 3. 看牌手势：握拳展开 (Fist to Open) ---
+        // 握拳展开看牌
         const isFist = h[8].y > h[6].y && h[12].y > h[10].y;
-        if (lastFistState && !isFist) { // 从握拳变为张开
-            revealAll();
-        }
-        lastFistState = isFist;
+        if (lastFist && !isFist) revealAll();
+        lastFist = isFist;
 
-        // 绘制辅助线
-        drawConnectors(ctx, h, HAND_CONNECTIONS, {color: '#b287ff', lineWidth: 2});
+        // 画手部骨架
+        window.drawConnectors(ctx, h, HAND_CONNECTIONS, {color: '#00f2fe', lineWidth: 3});
+        window.drawLandmarks(ctx, h, {color: '#fff', lineWidth: 1, radius: 2});
     }
     ctx.restore();
 });
 
-const cameraUtils = new Camera(videoElement, {
-    onFrame: async () => await hands.send({image: videoElement}),
-    width: 640, height: 480
-});
-cameraUtils.start();
+function startCamera() {
+    const cam = new Camera(video, {
+        onFrame: async () => await hands.send({image: video}),
+        width: 640, height: 480
+    });
+    cam.start().then(() => {
+        document.getElementById('status-msg').innerText = "✅ 链接成功";
+    }).catch(e => {
+        document.getElementById('status-msg').innerText = "❌ 摄像头被拦截";
+        console.error(e);
+    });
+}
 
+// 渲染循环
 function animate() {
     requestAnimationFrame(animate);
+    visualDeck.forEach((m, i) => m.rotation.y = Math.sin(Date.now()*0.001 + i) * 0.1);
     renderer.render(scene, camera);
 }
+
+startCamera();
+createVisualDeck();
+buildPool();
 animate();
-function changeSpread(v) { currentMode = v; performShuffle(); }
+
+function changeSpread(v) { currentMode = v; shuffleEffect(); }
 window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth/window.innerHeight;
     camera.updateProjectionMatrix();
